@@ -6,6 +6,7 @@ import { ChangeEvent, useState } from "react";
 
 export default function Upload() {
   const [file, setFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -25,6 +26,14 @@ export default function Upload() {
         headers: {
           "Content-Type": "multipart/form-data",
         },
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
+            const percentCompleted = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total
+            );
+            setUploadProgress(percentCompleted);
+          }
+        },
       });
       alert("Video uploaded successfully!");
     } catch (error) {
@@ -34,9 +43,15 @@ export default function Upload() {
   };
 
   return (
-    <form onSubmit={handleSubmit}>
-      <input type="file" onChange={handleFileChange} />
-      <button type="submit">Upload</button>
-    </form>
+    <div>
+      <form onSubmit={handleSubmit}>
+        <input type="file" onChange={handleFileChange} />
+        <button type="submit">Upload</button>
+      </form>
+      {uploadProgress > 0 && <div>Upload Progress: {uploadProgress}%</div>}
+      {uploadProgress > 0 && (
+        <progress value={uploadProgress} max="100"></progress>
+      )}
+    </div>
   );
 }

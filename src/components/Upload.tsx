@@ -11,6 +11,23 @@ export default function Upload() {
   const [uploadProgress, setUploadProgress] = useState<number[]>([]);
   const [totalUploadProgress, setTotalUploadProgress] = useState<number>(0); // Added state for total upload progress
 
+  const getStoredProgress = (fileId: string) => {
+    const progress = localStorage.getItem(`uploadProgress-${fileId}`);
+    return progress ? JSON.parse(progress) : [];
+  };
+
+  const storeProgress = (fileId: string, chunkId: number) => {
+    const currentProgress = getStoredProgress(fileId);
+
+    if (!currentProgress.includes(chunkId)) {
+      currentProgress.push(chunkId);
+      localStorage.setItem(
+        `uploadProgress-${fileId}`,
+        JSON.stringify(currentProgress)
+      );
+    }
+  };
+
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       setFile(e.target.files[0]);
@@ -26,41 +43,57 @@ export default function Upload() {
     totalChunks: number,
     fileId: string // Include fileId in the parameters
   ) => {
+    const storedProgress = getStoredProgress(fileId);
+    if (storedProgress.includes(chunkId)) {
+      return Promise.resolve();
+    }
+
     const formData = new FormData();
     formData.append("chunk", chunk);
     formData.append("chunkId", chunkId.toString());
     formData.append("totalChunks", totalChunks.toString()); // Send totalChunks to backend
     formData.append("fileId", fileId); // Send fileId to backend
 
-    return axiosInstance.post("/upload/chunk", formData, {
-      // Ensure endpoint matches backend
-      headers: {
-        "Content-Type": "multipart/form-data",
-      },
-      onUploadProgress: (progressEvent) => {
-        if (progressEvent.total) {
-          const progress = (progressEvent.loaded / progressEvent.total) * 100;
-          setUploadProgress((prevProgress) => {
-            const newProgress = [...prevProgress];
-            newProgress[chunkId] = progress;
+    return axiosInstance
+      .post("/upload/chunk", formData, {
+        // Ensure endpoint matches backend
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
+            const progress = (progressEvent.loaded / progressEvent.total) * 100;
+            setUploadProgress((prevProgress) => {
+              const newProgress = [...prevProgress];
+              newProgress[chunkId] = progress;
 
-            // Calculate and set total upload progress
-            const totalProgress =
-              newProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
-            setTotalUploadProgress(totalProgress);
+              // Calculate and set total upload progress
+              const totalProgress =
+                newProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
+              setTotalUploadProgress(totalProgress);
 
-            return newProgress;
-          });
-        }
-      },
-    });
+              return newProgress;
+            });
+          }
+        },
+      })
+      .then(() => storeProgress(fileId, chunkId));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return;
 
-    const fileId = uuidv4(); // Generate a unique fileId for this upload
+    let fileId: string;
+
+    // Check if we're resuming an upload and if a fileId already exists
+    const savedFileId = localStorage.getItem("currentUploadFileId");
+    if (savedFileId) {
+      fileId = savedFileId;
+    } else {
+      fileId = uuidv4();
+      localStorage.setItem("currentUploadFileId", fileId);
+    }
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const chunks = [];
     for (let start = 0; start < file.size; start += CHUNK_SIZE) {
@@ -68,7 +101,13 @@ export default function Upload() {
       chunks.push(chunk);
     }
 
-    setUploadProgress(Array(chunks.length).fill(0)); // Initialize progress for each chunk
+    // Initialize uploadProgress based on what's already uploaded
+    const storedProgress = getStoredProgress(fileId); // Function to retrieve stored progress
+    setUploadProgress(
+      Array(totalChunks)
+        .fill(0)
+        .map((_, index) => (storedProgress.includes(index) ? 100 : 0))
+    );
 
     await Promise.all(
       chunks.map(
@@ -76,13 +115,16 @@ export default function Upload() {
       )
     );
 
-    // Calculate and set total upload progress after all chunks are uploaded
-    const totalProgress =
-      uploadProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
-    console.log(totalUploadProgress);
-    setTotalUploadProgress(totalProgress);
+    setTimeout(() => {
+      const totalProgress =
+        uploadProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
+      setTotalUploadProgress(totalProgress);
 
-    alert("Video uploaded successfully!");
+      // Clean up after successful upload
+      localStorage.removeItem("currentUploadFileId"); // Important: Remove fileId from localStorage
+      localStorage.removeItem(`uploadProgress-${fileId}`); // Important: Remove Chunk upload progress from localStorage
+      alert("Video uploaded successfully!");
+    }, 0);
   };
 
   return (

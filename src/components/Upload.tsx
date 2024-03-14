@@ -1,7 +1,7 @@
 "use client";
 
 import axiosInstance from "@/axios"; // Assuming this is correctly configured
-import { ChangeEvent, useState } from "react";
+import { ChangeEvent, useEffect, useState } from "react";
 import { v4 as uuidv4 } from "uuid"; // For generating unique file IDs
 
 const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB; adjust as needed
@@ -14,6 +14,33 @@ export default function Upload() {
   const getStoredProgress = (fileId: string) => {
     const progress = localStorage.getItem(`uploadProgress-${fileId}`);
     return progress ? JSON.parse(progress) : [];
+  };
+
+  const getCurrentFileId = () => {
+    // Check if file data is stored in localStorage
+    const fileData = localStorage.getItem("uploadFileData");
+
+    console.log("fileData", fileData);
+    if (fileData) {
+      // Parse file data and set it to state
+      const parsedFileData = JSON.parse(fileData);
+      const shouldContinue = window.confirm(
+        `A previous upload of file ${parsedFileData.name} was not completed. You can select the file again and the upload will continue`
+      );
+      if (shouldContinue) {
+        setFile(
+          new File([""], parsedFileData.name, {
+            type: parsedFileData.type,
+            lastModified: parsedFileData.lastModified,
+          })
+        );
+      } else {
+        // Clear localStorage
+        localStorage.removeItem("uploadFileData");
+        localStorage.removeItem("currentUploadFileId");
+        localStorage.removeItem(`uploadProgress-${parsedFileData.fileId}`);
+      }
+    }
   };
 
   const storeProgress = (fileId: string, chunkId: number) => {
@@ -84,6 +111,13 @@ export default function Upload() {
     e.preventDefault();
     if (!file) return;
 
+    const fileData = {
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      lastModified: file.lastModified,
+    };
+    localStorage.setItem("uploadFileData", JSON.stringify(fileData));
     let fileId: string;
 
     // Check if we're resuming an upload and if a fileId already exists
@@ -126,6 +160,12 @@ export default function Upload() {
       alert("Video uploaded successfully!");
     }, 0);
   };
+
+  useEffect(() => {
+    getCurrentFileId();
+
+    return () => {};
+  }, []);
 
   return (
     <div>

@@ -1,10 +1,11 @@
 "use client";
 
 import axiosInstance from "@/axios"; // Assuming this is correctly configured
+import { AxiosResponse } from "axios";
 import { ChangeEvent, useEffect, useState } from "react";
 import { v4 as uuidv4 } from "uuid"; // For generating unique file IDs
 
-const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB; adjust as needed
+const CHUNK_SIZE = 5 * 1024 * 1024; // 1MB; adjust as needed
 
 export default function Upload() {
   const [file, setFile] = useState<File | null>(null);
@@ -20,7 +21,6 @@ export default function Upload() {
     // Check if file data is stored in localStorage
     const fileData = localStorage.getItem("uploadFileData");
 
-    console.log("fileData", fileData);
     if (fileData) {
       // Parse file data and set it to state
       const parsedFileData = JSON.parse(fileData);
@@ -68,7 +68,8 @@ export default function Upload() {
     chunk: Blob,
     chunkId: number,
     totalChunks: number,
-    fileId: string // Include fileId in the parameters
+    fileId: string, // Include fileId in the parameters
+    uploadId: string // Include uploadId in the parameters
   ) => {
     const storedProgress = getStoredProgress(fileId);
     if (storedProgress.includes(chunkId)) {
@@ -80,36 +81,39 @@ export default function Upload() {
     formData.append("chunkId", chunkId.toString());
     formData.append("totalChunks", totalChunks.toString()); // Send totalChunks to backend
     formData.append("fileId", fileId); // Send fileId to backend
+    formData.append("uploadId", uploadId); // Send fileId to backend
 
-    return axiosInstance
-      .post("/upload/chunk", formData, {
-        // Ensure endpoint matches backend
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-        onUploadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            const progress = (progressEvent.loaded / progressEvent.total) * 100;
-            setUploadProgress((prevProgress) => {
-              const newProgress = [...prevProgress];
-              newProgress[chunkId] = progress;
+    return axiosInstance.post("/upload/chunk", formData, {
+      // Ensure endpoint matches backend
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+      onUploadProgress: (progressEvent) => {
+        if (progressEvent.total) {
+          const progress = (progressEvent.loaded / progressEvent.total) * 100;
+          setUploadProgress((prevProgress) => {
+            const newProgress = [...prevProgress];
+            newProgress[chunkId] = progress;
 
-              // Calculate and set total upload progress
-              const totalProgress =
-                newProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
-              setTotalUploadProgress(totalProgress);
+            // Calculate and set total upload progress
+            const totalProgress =
+              newProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
+            setTotalUploadProgress(totalProgress);
 
-              return newProgress;
-            });
-          }
-        },
-      })
-      .then(() => storeProgress(fileId, chunkId));
+            return newProgress;
+          });
+        }
+      },
+      // })
+      // .then((response) => {
+    });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return;
+
+    const etagsCollected = []; // Temporary array to collect ETags
 
     const fileData = {
       name: file.name,
@@ -119,19 +123,33 @@ export default function Upload() {
     };
     localStorage.setItem("uploadFileData", JSON.stringify(fileData));
     let fileId: string;
+    let uploadId: string;
 
     // Check if we're resuming an upload and if a fileId already exists
     const savedFileId = localStorage.getItem("currentUploadFileId");
-    if (savedFileId) {
+    const savedUploadId = localStorage.getItem("currentUploadId");
+    if (savedFileId && savedUploadId) {
       fileId = savedFileId;
+      uploadId = savedUploadId;
     } else {
       fileId = uuidv4();
+      const response = await axiosInstance.post("/upload/initiate", { fileId });
+      uploadId = response.data.UploadId;
       localStorage.setItem("currentUploadFileId", fileId);
+      localStorage.setItem("currentUploadId", uploadId);
     }
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const chunks = [];
     for (let start = 0; start < file.size; start += CHUNK_SIZE) {
-      const chunk = file.slice(start, start + CHUNK_SIZE);
+      let end = start + CHUNK_SIZE;
+
+      // If the remaining part of the file is smaller than CHUNK_SIZE,
+      // take the rest of the file as the last chunk.
+      if (file.size - end < CHUNK_SIZE) {
+        end = file.size;
+      }
+
+      const chunk = file.slice(start, end);
       chunks.push(chunk);
     }
 
@@ -143,22 +161,48 @@ export default function Upload() {
         .map((_, index) => (storedProgress.includes(index) ? 100 : 0))
     );
 
-    await Promise.all(
-      chunks.map(
-        (chunk, index) => uploadChunk(chunk, index, totalChunks, fileId) // Pass fileId to uploadChunk
-      )
-    );
+    for (let i = 0; i < totalChunks; i++) {
+      try {
+        const response = (await uploadChunk(
+          chunks[i],
+          i + 1,
+          totalChunks,
+          fileId,
+          uploadId
+        )) as AxiosResponse;
 
-    setTimeout(() => {
-      const totalProgress =
-        uploadProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
-      setTotalUploadProgress(totalProgress);
+        storeProgress(fileId, i + 1);
 
-      // Clean up after successful upload
-      localStorage.removeItem("currentUploadFileId"); // Important: Remove fileId from localStorage
-      localStorage.removeItem(`uploadProgress-${fileId}`); // Important: Remove Chunk upload progress from localStorage
+        etagsCollected[i] = { ETag: response?.data?.ETag, PartNumber: i + 1 }; // Collect ETag with part number
+      } catch (error) {
+        console.error(`Failed to upload chunk ${i + 1}:`, error);
+        // Optionally, add logic to handle the upload failure, such as retrying
+        return;
+      }
+    }
+    // After all chunk uploads are completed, call the merge API
+    try {
+      const mergeResponse = await axiosInstance.post("/upload/merge", {
+        fileId,
+        uploadId,
+        etags: etagsCollected.filter((etag) => etag !== undefined), // Ensure only defined ETags are sent
+      });
+
+      // Cleanup after successful upload
+      localStorage.removeItem("currentUploadFileId");
+      localStorage.removeItem("currentUploadId");
+      localStorage.removeItem(`uploadProgress-${fileId}`);
+      localStorage.removeItem("uploadFileData");
       alert("Video uploaded successfully!");
-    }, 0);
+
+      // Reset states
+      setFile(null);
+      setTotalUploadProgress(0);
+      setUploadProgress([]);
+    } catch (error) {
+      console.error("Error during file merge:", error);
+      alert("Error during file merge.");
+    }
   };
 
   useEffect(() => {

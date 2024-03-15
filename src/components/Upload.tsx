@@ -5,11 +5,16 @@ import { AxiosResponse } from "axios";
 import { ChangeEvent, useEffect, useState } from "react";
 import { v4 as uuidv4 } from "uuid"; // For generating unique file IDs
 
-const CHUNK_SIZE = 5 * 1024 * 1024; // 1MB; adjust as needed
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB; adjust as needed
+
+interface UploadProgress {
+  clientToServer: number;
+  serverToDisk: number;
+}
 
 export default function Upload() {
   const [file, setFile] = useState<File | null>(null);
-  const [uploadProgress, setUploadProgress] = useState<number[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress[]>([]);
   const [totalUploadProgress, setTotalUploadProgress] = useState<number>(0); // Added state for total upload progress
 
   const getStoredProgress = (fileId: string) => {
@@ -93,27 +98,46 @@ export default function Upload() {
           const progress = (progressEvent.loaded / progressEvent.total) * 100;
           setUploadProgress((prevProgress) => {
             const newProgress = [...prevProgress];
-            newProgress[chunkId] = progress;
 
-            // Calculate and set total upload progress
-            const totalProgress =
-              newProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
-            setTotalUploadProgress(totalProgress);
+            if (newProgress[chunkId - 1].clientToServer !== 100) {
+              newProgress[chunkId - 1].clientToServer = progress;
+
+              // Calculate and set total upload progress
+              const totalProgress =
+                newProgress.reduce(
+                  (acc, cur) => acc + cur.clientToServer / 2,
+                  0
+                ) / totalChunks;
+
+              console.log("totalProgress", totalProgress);
+
+              setTotalUploadProgress(totalProgress);
+            }
 
             return newProgress;
           });
         }
       },
-      // })
-      // .then((response) => {
     });
   };
+
+  // useEffect(() => {
+  //   setTotalUploadProgress(() => {
+  //     return (
+  //       uploadProgress.reduce((total, progress) => {
+  //         return total + (progress.clientToServer + progress.serverToDisk) / 2;
+  //       }, 0) / uploadProgress.length
+  //     );
+  //   });
+
+  //   return () => {};
+  // }, [uploadProgress]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return;
 
-    const etagsCollected = []; // Temporary array to collect ETags
+    const etagsCollected: any = []; // Temporary array to collect ETags
 
     const fileData = {
       name: file.name,
@@ -139,6 +163,11 @@ export default function Upload() {
       localStorage.setItem("currentUploadId", uploadId);
     }
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+    setUploadProgress(
+      new Array(totalChunks).fill({ clientToServer: 0, serverToDisk: 0 })
+    );
+
     const chunks = [];
     for (let start = 0; start < file.size; start += CHUNK_SIZE) {
       let end = start + CHUNK_SIZE;
@@ -155,37 +184,98 @@ export default function Upload() {
 
     // Initialize uploadProgress based on what's already uploaded
     const storedProgress = getStoredProgress(fileId); // Function to retrieve stored progress
-    setUploadProgress(
-      Array(totalChunks)
-        .fill(0)
-        .map((_, index) => (storedProgress.includes(index) ? 100 : 0))
+
+    // setUploadProgress(
+    //   Array(totalChunks)
+    //     .fill(0)
+    //     .map((_, index) => (storedProgress.includes(index) ? 100 : 0))
+    // );
+    const eventSource = new EventSource(
+      `http://localhost:4000/api/progress/${uploadId}`
     );
 
-    for (let i = 0; i < totalChunks; i++) {
-      try {
-        const response = (await uploadChunk(
-          chunks[i],
-          i + 1,
-          totalChunks,
-          fileId,
-          uploadId
-        )) as AxiosResponse;
+    eventSource.onmessage = function (event) {
+      const data = JSON.parse(event.data);
+      console.log("Progress update:", data);
 
-        storeProgress(fileId, i + 1);
+      // Update your progress UI here
+      setTotalUploadProgress((prevTotalProgress) => {
+        setUploadProgress((prevProgress) => {
+          const newProgress = [...prevProgress];
 
-        etagsCollected[i] = { ETag: response?.data?.ETag, PartNumber: i + 1 }; // Collect ETag with part number
-      } catch (error) {
-        console.error(`Failed to upload chunk ${i + 1}:`, error);
-        // Optionally, add logic to handle the upload failure, such as retrying
-        return;
-      }
-    }
+          newProgress[data.chunkId - 1].serverToDisk = 100;
+
+          const totalProgress =
+            newProgress.reduce(
+              (acc, cur) => acc + cur.serverToDisk / 2,
+              prevTotalProgress
+            ) / totalChunks;
+
+          console.log("totalProgress in eventSource", totalProgress);
+
+          // setTotalUploadProgress(totalProgress);
+
+          return newProgress;
+        });
+
+        return totalUploadProgress;
+      });
+
+      // if (progressEvent.total) {
+      //     const progress = (progressEvent.loaded / progressEvent.total) * 100;
+      //     setUploadProgress((prevProgress) => {
+      //       const newProgress = [...prevProgress];
+
+      //       newProgress[chunkId] = progress;
+
+      //       // Calculate and set total upload progress
+      //       const totalProgress =
+      //         newProgress.reduce((acc, cur) => acc + cur, 0) / totalChunks;
+
+      //       setTotalUploadProgress(totalProgress);
+
+      //       return newProgress;
+      //     });
+      //   }
+      // },
+    };
+    await Promise.all(
+      chunks.map(async (chunk, index) => {
+        try {
+          const response = (await uploadChunk(
+            chunk,
+            index + 1,
+            totalChunks,
+            fileId,
+            uploadId
+          )) as AxiosResponse;
+
+          storeProgress(fileId, index + 1);
+
+          etagsCollected[index] = {
+            ETag: response?.data?.ETag,
+            PartNumber: index + 1,
+          }; // Collect ETag with part number
+        } catch (error) {
+          console.error(`Failed to upload chunk ${index + 1}:`, error);
+          // Optionally, add logic to handle the upload failure, such as retrying
+          return;
+        }
+      })
+    );
+
+    console.log(
+      "etagsCollected.length === totalChunks",
+      etagsCollected.length === totalChunks
+    );
+    console.log("etagsCollected", etagsCollected);
+
     // After all chunk uploads are completed, call the merge API
     try {
       const mergeResponse = await axiosInstance.post("/upload/merge", {
         fileId,
         uploadId,
-        etags: etagsCollected.filter((etag) => etag !== undefined), // Ensure only defined ETags are sent
+        etags: etagsCollected.filter((etag: any) => etag !== undefined), // Ensure only defined ETags are sent
       });
 
       // Cleanup after successful upload

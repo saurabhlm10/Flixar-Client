@@ -94,29 +94,38 @@ export default function Upload() {
         "Content-Type": "multipart/form-data",
       },
       onUploadProgress: (progressEvent) => {
-        if (progressEvent.total) {
-          const progress = (progressEvent.loaded / progressEvent.total) * 100;
-          setUploadProgress((prevProgress) => {
-            const newProgress = [...prevProgress];
+        setTotalUploadProgress((prevTotalProgress) => {
+          let newTotalProgress: any = prevTotalProgress;
+          if (progressEvent.total) {
+            const progress = (progressEvent.loaded / progressEvent.total) * 100;
+            setUploadProgress((prevProgress) => {
+              const newProgress = [...prevProgress];
 
-            if (newProgress[chunkId - 1].clientToServer !== 100) {
-              newProgress[chunkId - 1].clientToServer = progress;
+              if (newProgress[chunkId - 1].clientToServer !== 100) {
+                newProgress[chunkId - 1].clientToServer = progress;
 
-              // Calculate and set total upload progress
-              const totalProgress =
-                newProgress.reduce(
-                  (acc, cur) => acc + cur.clientToServer / 2,
-                  0
-                ) / totalChunks;
+                // Calculate and set total upload progress
+                const totalProgress =
+                  newProgress.reduce(
+                    (acc, cur) => acc + cur.clientToServer / 2,
+                    0
+                  ) / totalChunks;
 
-              console.log("totalProgress", totalProgress);
+                console.log("totalProgress", totalProgress);
 
-              setTotalUploadProgress(totalProgress);
-            }
+                newTotalProgress =
+                  totalProgress > prevTotalProgress
+                    ? totalProgress
+                    : prevProgress;
 
-            return newProgress;
-          });
-        }
+                setTotalUploadProgress(totalProgress);
+              }
+
+              return newProgress;
+            });
+            return newTotalProgress;
+          }
+        });
       },
     });
   };
